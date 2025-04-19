@@ -1,0 +1,47 @@
+preprocessing:
+  label:
+    norm: True
+    top_k: 527
+    quantization: False
+    threshold: 0.01
+    label_use_original_ground_truth: False
+  audio:
+    sampling_rate: 16000
+    max_wav_value: 32768.0
+  stft:
+    filter_length: 1024
+    hop_length: 160
+    win_length: 1024
+  mel:
+    n_mel_channels: 64 # TODO might need to change # 64 or 128
+    mel_fmin: 0
+    mel_fmax: 8000 # please set to 8000 for HiFi-GAN vocoder, set to null for MelGAN vocoder
+    freqm: 0
+    timem: 0
+    blur: False
+    # mean: -4.63
+    # std: 2.74
+    target_length: 1024
+
+augmentation:
+  mixup: 0.0
+  return_all_wav: False
+  balanced_sampling: False
+  masking: False #True
+
+path:
+  dataset_type: "MultiSource_Slakh"
+  train_data:
+    - /home/mafzhang/data/slakh2100/train
+    - /home/mafzhang/data/slakh2100/validation
+  valid_data: /home/mafzhang/data/slakh2100/test
+  test_data: #"data/Audiostock-10k-16khz/test_split_audio_content_analysis.json"
+  label_data: #"data/Audiostock-10k-16khz/label"
+  tempo_data: ""
+  tempo_map: ""
+  stems: 
+    - 'bass'
+    - 'drums'
+    - 'guitar'
+    - 'piano'
+  shuffle_val_test: False
