@@ -47,11 +47,12 @@ def main(args):
     os.makedirs(os.path.join(logdir, "target"), exist_ok=True)
 
 
-    wandb.init(config=args,
-               project="multisource-music-generation",
-               name="{}".format(args.task),
-               dir=args.logdir,
-               job_type="training")
+    if accelerator.is_main_process:
+        wandb.init(config=args,
+                project="multisource-music-generation",
+                name="{}".format(args.task),
+                dir=args.logdir,
+                job_type="training")
 
 
     for epoch in range(args.epochs):
@@ -66,13 +67,15 @@ def main(args):
             loss_meter.update(loss.item(), batch["mel"].shape[0])
 
         print(f"Epoch: {epoch}, Step: {step}, Loss: {loss_meter.avg}")
-        wandb.log({"train/loss": loss_meter.avg}, step=epoch*len(train_dloader))
+        if accelerator.is_main_process:
+            wandb.log({"train/loss": loss_meter.avg}, step=epoch*len(train_dloader))
 
         if epoch % 10 == 0:
             model.eval()
             for stem in range(args.nstems):
-                os.makedirs(os.path.join(logdir, "val/epoch_{}/stem_{}".format(epoch, stem)), exist_ok=True)
-                os.makedirs(os.path.join(logdir, "target/stem_{}".format(stem)), exist_ok=True)
+                if accelerator.is_main_process:
+                    os.makedirs(os.path.join(logdir, "val/epoch_{}/stem_{}".format(epoch, stem)), exist_ok=True)
+                    os.makedirs(os.path.join(logdir, "target/stem_{}".format(stem)), exist_ok=True)
 
             with torch.no_grad():
                 log_dir = {}
@@ -82,16 +85,17 @@ def main(args):
                     val_waveforms = accelerator.gather(val_waveforms)
                     target_waveforms = accelerator.gather(test_batch['waveform'])
                     
-                    for i in range(val_waveforms.shape[0]):
-                        for stem in range(args.nstems):
-                            log_dir['val_stem_{}_sample_{}'.format(stem, test_step*val_waveforms.shape[0]+i)] = wandb.Audio(val_waveforms[i, stem].detach().cpu().numpy(), sample_rate=16000)
-                            torchaudio.save(os.path.join(logdir, "val/epoch_{}/stem_{}".format(epoch, stem), "{}.wav".format(test_step*val_waveforms.shape[0]+i)), val_waveforms[i, stem].detach().cpu(), 16000)
-                            torchaudio.save(os.path.join(logdir, "target/stem_{}".format(stem), "{}.wav".format(test_step*val_waveforms.shape[0]+i)), target_waveforms[i, stem].detach().cpu().unsqueeze(0), 16000)
-                
-                wandb.log(log_dir, step=epoch*len(train_dloader))
 
-                # Evaluate
+                    if accelerator.is_main_process:
+                        for i in range(val_waveforms.shape[0]):
+                            for stem in range(args.nstems):
+                                log_dir['val_stem_{}_sample_{}'.format(stem, test_step*val_waveforms.shape[0]+i)] = wandb.Audio(val_waveforms[i, stem].detach().cpu().numpy(), sample_rate=16000)
+                                torchaudio.save(os.path.join(logdir, "val/epoch_{}/stem_{}".format(epoch, stem), "{}.wav".format(test_step*val_waveforms.shape[0]+i)), val_waveforms[i, stem].detach().cpu(), 16000)
+                                torchaudio.save(os.path.join(logdir, "target/stem_{}".format(stem), "{}.wav".format(test_step*val_waveforms.shape[0]+i)), target_waveforms[i, stem].detach().cpu().unsqueeze(0), 16000)
+                
                 if accelerator.is_main_process:
+                    wandb.log(log_dir, step=epoch*len(train_dloader))
+
                     target_dir = os.path.join(logdir, "target/")
                     val_dir = os.path.join(logdir, "val/epoch_{}".format(epoch))
                     metrics_buffer = {}
