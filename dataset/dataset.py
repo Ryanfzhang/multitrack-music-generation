@@ -322,8 +322,8 @@ class AudiostockDataset(Dataset):
         return data_dict
 
     def __len__(self):
-        return self.total_len
-        # return 12
+        # return self.total_len
+        return 12
 
 
 

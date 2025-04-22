@@ -55,6 +55,7 @@ def main(args):
                 job_type="training")
 
 
+    best_fad = 100
     for epoch in range(args.epochs):
         loss_meter = AverageMeter()
         model.train()
@@ -72,10 +73,12 @@ def main(args):
 
         if epoch % 10 == 0:
             model.eval()
-            for stem in range(args.nstems):
-                if accelerator.is_main_process:
+            if accelerator.is_main_process:
+                for stem in range(args.nstems):
                     os.makedirs(os.path.join(logdir, "val/epoch_{}/stem_{}".format(epoch, stem)), exist_ok=True)
                     os.makedirs(os.path.join(logdir, "target/stem_{}".format(stem)), exist_ok=True)
+                os.makedirs(os.path.join(logdir, "target/mixture"), exist_ok=True)
+                os.makedirs(os.path.join(logdir, "val/epoch_{}/mixture".format(epoch)), exist_ok=True)
 
             with torch.no_grad():
                 log_dir = {}
@@ -89,9 +92,12 @@ def main(args):
                     if accelerator.is_main_process:
                         for i in range(val_waveforms.shape[0]):
                             for stem in range(args.nstems):
-                                log_dir['val_stem_{}_sample_{}'.format(stem, test_step*val_waveforms.shape[0]+i)] = wandb.Audio(val_waveforms[i, stem].detach().cpu().numpy(), sample_rate=16000)
+                                log_dir['val_stem_{}_sample_{}'.format(stem, test_step*val_waveforms.shape[0]+i)] = wandb.Audio(val_waveforms[i, stem].detach().cpu().numpy().reshape(-1), sample_rate=16000)
                                 torchaudio.save(os.path.join(logdir, "val/epoch_{}/stem_{}".format(epoch, stem), "{}.wav".format(test_step*val_waveforms.shape[0]+i)), val_waveforms[i, stem].detach().cpu(), 16000)
                                 torchaudio.save(os.path.join(logdir, "target/stem_{}".format(stem), "{}.wav".format(test_step*val_waveforms.shape[0]+i)), target_waveforms[i, stem].detach().cpu().unsqueeze(0), 16000)
+                        log_dir['val_mixture_sample_{}'.format(stem, test_step*val_waveforms.shape[0]+i)] = wandb.Audio(val_waveforms[i].sum(1).detach().cpu().numpy().reshape(-1), sample_rate=16000)
+                        torchaudio.save(os.path.join(logdir, "val/epoch_{}/mixture".format(epoch), "{}.wav".format(test_step*val_waveforms.shape[0]+i)), val_waveforms[i].sum(1).detach().cpu(), 16000)
+                        torchaudio.save(os.path.join(logdir, "target/mixture", "{}.wav".format(test_step*val_waveforms.shape[0]+i)), target_waveforms[i].sum(1).detach().cpu().unsqueeze(0), 16000)
                 
                 if accelerator.is_main_process:
                     wandb.log(log_dir, step=epoch*len(train_dloader))
@@ -106,6 +112,18 @@ def main(args):
                         metrics_buffer = {
                                 ("val/stem_{}/".format(stem) + k): float(v) for k, v in metrics.items()
                             }
+
+                    evaluator = EvaluationHelper(16000, accelerator.device)
+                    metrics = evaluator.main(str(target_dir)+"/mixture", str(val_dir)+"/mixture")
+                    metrics_buffer = {
+                            ("val/mixture/" + k): float(v) for k, v in metrics.items()
+                        }
+                    print(metrics_buffer)
+                    print(metrics_buffer.keys())
+                    if metrics_buffer['val/mixture/frechet_audio_distance'] < best_fad:
+                        best_fad = metrics_buffer['val/mixture/frechet_audio_distance']
+                        accelerator.print("Best FAD: {}".format(best_fad))
+                        torch.save(model.module.state_dict(), os.path.join(logdir, "best_model.pth"))
 
                     wandb.log(metrics_buffer, step=epoch*len(train_dloader))
                     accelerator.print(metrics_buffer)
