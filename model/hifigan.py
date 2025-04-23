@@ -153,7 +153,8 @@ class Generator(torch.nn.Module):
         self.conv_post = weight_norm(Conv1d(ch, 1, 7, 1, padding=3))
         self.ups.apply(init_weights)
         self.conv_post.apply(init_weights)
-        self.init_from_checkpoint(os.path.join(config.path, "checkpoint/hifigan.ckpt"))
+        # self.init_from_checkpoint(os.path.join(config.path, "checkpoint/hifigan.ckpt"))
+        self.init_from_checkpoint("/home/hwangfb/Desktop/code/MSG-LD/ckpt/hifigan-ckpt.ckpt")
 
     def forward(self, x):
         x = self.conv_pre(x)

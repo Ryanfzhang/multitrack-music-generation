@@ -22,11 +22,11 @@ import argparse
 
 def main(args):
     
-    train_dataset = MultiSource_Slakh_Dataset(dataset_path="/home/mafzhang/data/slakh2100/train", label_path=None, config=yaml.safe_load(open("./dataset/dataconfig.yaml")))
-    test_dataset = MultiSource_Slakh_Dataset(dataset_path="/home/mafzhang/data/slakh2100/test", label_path=None, config=yaml.safe_load(open("./dataset/dataconfig.yaml")))
+    train_dataset = MultiSource_Slakh_Dataset(dataset_path=["/home/hwangfb/Desktop/data/slakh2100/slakh2100/train", "/home/hwangfb/Desktop/data/slakh2100/slakh2100/validation"], label_path=None, config=yaml.safe_load(open("./dataset/dataconfig.yaml")))
+    test_dataset = MultiSource_Slakh_Dataset(dataset_path="/home/hwangfb/Desktop/data/slakh2100/slakh2100/test", label_path=None, config=yaml.safe_load(open("./dataset/dataconfig.yaml")))
 
-    train_dloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
-    test_dloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    train_dloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
+    test_dloader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
 
     model = MusicLDM(args)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
@@ -55,6 +55,7 @@ def main(args):
                 job_type="training")
 
 
+    best_fad = 100
     for epoch in range(args.epochs):
         loss_meter = AverageMeter()
         model.train()
@@ -72,16 +73,19 @@ def main(args):
 
         if epoch % 10 == 0:
             model.eval()
-            for stem in range(args.nstems):
-                if accelerator.is_main_process:
+            if accelerator.is_main_process:
+                for stem in range(args.nstems):
                     os.makedirs(os.path.join(logdir, "val/epoch_{}/stem_{}".format(epoch, stem)), exist_ok=True)
                     os.makedirs(os.path.join(logdir, "target/stem_{}".format(stem)), exist_ok=True)
+                os.makedirs(os.path.join(logdir, "target/mixture"), exist_ok=True)
+                os.makedirs(os.path.join(logdir, "val/epoch_{}/mixture".format(epoch)), exist_ok=True)
 
             with torch.no_grad():
                 log_dir = {}
 
                 for test_step, test_batch in tqdm(enumerate(test_dloader), total=len(test_dloader)):
-                    val_mels, val_waveforms = model.module.generate(args.nsamples*test_batch['mel'].shape[0])
+
+                    val_mels, val_waveforms = model.module.generate(args.nsamples*test_batch['mel'].shape[0], test_batch['mel_mix'])
                     val_waveforms = accelerator.gather(val_waveforms)
                     target_waveforms = accelerator.gather(test_batch['waveform'])
                     
@@ -89,9 +93,12 @@ def main(args):
                     if accelerator.is_main_process:
                         for i in range(val_waveforms.shape[0]):
                             for stem in range(args.nstems):
-                                log_dir['val_stem_{}_sample_{}'.format(stem, test_step*val_waveforms.shape[0]+i)] = wandb.Audio(val_waveforms[i, stem].detach().cpu().numpy(), sample_rate=16000)
+                                log_dir['val_stem_{}_sample_{}'.format(stem, test_step*val_waveforms.shape[0]+i)] = wandb.Audio(val_waveforms[i, stem].detach().cpu().numpy().reshape(-1), sample_rate=16000)
                                 torchaudio.save(os.path.join(logdir, "val/epoch_{}/stem_{}".format(epoch, stem), "{}.wav".format(test_step*val_waveforms.shape[0]+i)), val_waveforms[i, stem].detach().cpu(), 16000)
                                 torchaudio.save(os.path.join(logdir, "target/stem_{}".format(stem), "{}.wav".format(test_step*val_waveforms.shape[0]+i)), target_waveforms[i, stem].detach().cpu().unsqueeze(0), 16000)
+                        log_dir['val_mixture_sample_{}'.format(stem, test_step*val_waveforms.shape[0]+i)] = wandb.Audio(val_waveforms[i].sum(1).detach().cpu().numpy().reshape(-1), sample_rate=16000)
+                        torchaudio.save(os.path.join(logdir, "val/epoch_{}/mixture".format(epoch), "{}.wav".format(test_step*val_waveforms.shape[0]+i)), val_waveforms[i].sum(1).detach().cpu(), 16000)
+                        torchaudio.save(os.path.join(logdir, "target/mixture", "{}.wav".format(test_step*val_waveforms.shape[0]+i)), target_waveforms[i].sum(1).detach().cpu().unsqueeze(0), 16000)
                 
                 if accelerator.is_main_process:
                     wandb.log(log_dir, step=epoch*len(train_dloader))
@@ -107,21 +114,33 @@ def main(args):
                                 ("val/stem_{}/".format(stem) + k): float(v) for k, v in metrics.items()
                             }
 
+                    evaluator = EvaluationHelper(16000, accelerator.device)
+                    metrics = evaluator.main(str(target_dir)+"/mixture", str(val_dir)+"/mixture")
+                    metrics_buffer = {
+                            ("val/mixture/" + k): float(v) for k, v in metrics.items()
+                        }
+                    print(metrics_buffer)
+                    print(metrics_buffer.keys())
+                    if metrics_buffer['val/mixture/frechet_audio_distance'] < best_fad:
+                        best_fad = metrics_buffer['val/mixture/frechet_audio_distance']
+                        accelerator.print("Best FAD: {}".format(best_fad))
+                        torch.save(model.module.state_dict(), os.path.join(logdir, "best_model.pth"))
+
                     wandb.log(metrics_buffer, step=epoch*len(train_dloader))
                     accelerator.print(metrics_buffer)
                     accelerator.print("Evaluation finished.")
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--batch_size", type=int, default=2)
+    parser.add_argument("--batch_size", type=int, default=6)
     parser.add_argument("--epochs", type=int, default=100)
     parser.add_argument("--nsamples", type=int, default=1)
     parser.add_argument("--nstems", type=int, default=4)
     parser.add_argument("--lr", type=float, default=3e-5)
     parser.add_argument("--weight_decay", type=float, default=0)
     parser.add_argument("--cosine_s", type=float, default=0.008)
-    parser.add_argument("--path", type=str, default="/home/mafzhang/code/music-generation/")
-    parser.add_argument("--logdir", type=str, default="/home/mafzhang/code/music-generation/logs/")
+    parser.add_argument("--path", type=str, default="/home/hwangfb/Desktop/code/multitrack-music-generation/")
+    parser.add_argument("--logdir", type=str, default="/home/hwangfb/Desktop/code/multitrack-music-generation/logs/")
     parser.add_argument("--task", type=str, default="origin")
     parser.add_argument("--training", type=int, default=1)
     parser.add_argument("--parameterization", type=str, default="x0")

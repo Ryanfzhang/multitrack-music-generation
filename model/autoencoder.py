@@ -23,7 +23,7 @@ class AutoencoderKL(nn.Module):
         embed_dim=8,
         time_shuffle=1,
         subband=1,
-        ckpt_path="checkpoint/vae.ckpt",
+        ckpt_path="/home/hwangfb/Desktop/code/MSG-LD/ckpt/vae-ckpt.ckpt",
         reload_from_ckpt=None,
         ignore_keys=[],
         image_key="fbank",

@@ -12,6 +12,7 @@ from model.hifigan import Generator
 from model.autoencoder import AutoencoderKL
 from model.unet import UNetModel
 from model.utils import make_beta_schedule, extract_into_tensor
+from model.modules import MixtureGuider
 
 class MusicLDM(nn.Module):
 
@@ -20,6 +21,12 @@ class MusicLDM(nn.Module):
         self.config = config
         self.training = config.training==1
         self.parameterization = config.parameterization
+        # x [B, S, C=8, T=256, F=16]
+        self.mix_attn = MixtureGuider(
+                channels=8*16,
+                num_heads=4,
+                num_head_channels=32,
+            )
         self.unet = UNetModel(config=config)
         
         self.autoencoder = AutoencoderKL(config=config)
@@ -137,6 +144,11 @@ class MusicLDM(nn.Module):
             z_mix = z_mix.mean
         return z, z_mix
 
+    def make_decision(self, probability):
+        if float(torch.rand(1)) < probability:
+            return True
+        else:
+            return False
     
     def q_sample(self, x_start, t, noise=None):
         noise = noise if noise is not None else torch.randn_like(x_start)
@@ -152,6 +164,10 @@ class MusicLDM(nn.Module):
         noise = torch.randn_like(latent)
         latent_noisy = self.q_sample(x_start=latent, t=t, noise=noise)
 
+        mask = torch.rand(latent_mixture.size(0), device=latent_mixture.device) < 0.1
+        latent_mixture[mask] = 0.0 
+
+        latent_noisy = self.mix_attn(latent_noisy, latent_mixture)
         model_out = self.unet(latent_noisy, t)
 
         loss_dict = {}
@@ -169,8 +185,11 @@ class MusicLDM(nn.Module):
         return loss
     
     @torch.no_grad()
-    def p_sample(self, x, t, clip_denoised=True, repeat_noise=False):
+    def p_sample(self, x, mix, t, clip_denoised=True, repeat_noise=False):
         b, *_, device = *x.shape, x.device
+        
+        mix = torch.zeros_like(mix)
+        x = self.mix_attn(latent_noisy=x, latent_mixture=mix)
         x_t = self.unet(x, t)
 
         if self.parameterization == "eps":
@@ -198,19 +217,23 @@ class MusicLDM(nn.Module):
         return posterior_mean + nonzero_mask * torch.exp(0.5 * posterior_log_variance_clipped) * repeat_noise
 
     @torch.no_grad()
-    def generate(self, nsamples, return_intermediates=False):
+    def generate(self, nsamples, mixture, return_intermediates=False):
         self.training=0
         device = self.betas.device
         b = nsamples
         img = torch.randn((nsamples, 4, 8, 256, 16), device=device)
+        
+        mixture = self.autoencoder.encode(mixture).mean
+
         for i in tqdm(
             reversed(range(0, self.num_timesteps)),
             desc="Sampling t",
             total=self.num_timesteps,
         ):
             img = self.p_sample(
-                img,
-                torch.full((b,), i, device=device, dtype=torch.long),
+                x=img,
+                mix=mixture,
+                t=torch.full((b,), i, device=device, dtype=torch.long),
                 clip_denoised=True,
             )
         

@@ -46,7 +46,7 @@ class UNetModel(nn.Module):
     def __init__(
         self,
         config=None,
-        ckpt_path="./checkpoint/unet.ckpt", 
+        ckpt_path="/home/hwangfb/Desktop/code/multitrack-music-generation/model/checkpoint/unet.ckpt", 
         image_size=64,
         in_channels=8,
         model_channels=128,
@@ -367,11 +367,16 @@ class UNetModel(nn.Module):
             )
 
         self.shape_reported = False
+        self.switcher = nn.Parameter(th.eye(4).fliplr(), requires_grad=False)
+        self.switcher_transform = nn.Sequential(nn.Linear(8, 128), 
+        nn.SiLU(), 
+        nn.Linear(128, time_embed_dim)
+        )
 
         self.init_from_checkpoint()
     
     def init_from_checkpoint(self):
-        self.load_state_dict(torch.load(self.path))
+        self.load_state_dict(torch.load(self.path), strict=False)
         print("Load UNet from %s" % self.path)
 
     def convert_to_fp16(self):
@@ -399,6 +404,8 @@ class UNetModel(nn.Module):
         :param y: an [N] Tensor of labels, if class-conditional. an [N, extra_film_condition_dim] Tensor if film-embed conditional
         :return: an [N x C x ...] Tensor of outputs.
         """
+        B, N, C, T, F = x.shape
+
         # if not self.shape_reported:
         #     print("The shape of UNet input is", x.size())
         #     self.shape_reported = True
@@ -408,22 +415,30 @@ class UNetModel(nn.Module):
         # ), "must specify y if and only if the model is class-conditional or film embedding conditional"
         hs = []
         tracks = x.shape[1]
-        x = rearrange(x, "b c d h w -> (b c) d  h w")
-        timesteps = timesteps.unsqueeze(1).expand(-1, tracks).reshape(-1)
+        x = rearrange(x, "b c d h w -> (b c) d  h w") #b=2
+        timesteps = timesteps.unsqueeze(1).expand(-1, tracks).reshape(-1) #[8,]
 
-        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False)
-        emb = self.time_embed(t_emb)
-        emb = torch.cat([emb, emb], dim=-1)  # for film
+        t_emb = timestep_embedding(timesteps, self.model_channels, repeat_only=False) #[8,128]
+        emb = self.time_embed(t_emb) # [8, 512]
 
         if self.num_classes is not None:
             assert y.shape == (x.shape[0],)
             emb = emb + self.label_emb(y)
-
+	
+        switcher = th.cat([th.sin(self.switcher), th.cos(self.switcher)], dim=-1)
+        switch_emb = self.switcher_transform(switcher) # [4, 512]
+        switch_emb = switch_emb.unsqueeze(0).expand(B, N, -1) # [2, 4, 512]
+	
         # if self.use_extra_film_by_addition:
         #     emb = emb + self.film_emb(y)
         # elif self.use_extra_film_by_concat:
         #     emb = th.cat([emb, self.film_emb(y)], dim=-1)
-
+        use_switcher = False
+        if use_switcher:
+            emb = th.cat([emb, switch_emb.reshape(B*N,-1)], dim=-1) # [8,512] concat [8,512] --> [8, 1024]
+        else:
+            empty_emb = torch.zeros(switch_emb.reshape(B*N,-1).size(), dtype=emb.dtype, device=emb.device)  # [8,512] for film
+            emb = torch.cat([emb, empty_emb], dim=-1)  # for film
         h = x.type(self.dtype)
 
         for module in self.input_blocks:
